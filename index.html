@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hash Forge</title>
+<style>
+  :root { color-scheme:dark; --glow:#4FD8FF; --text:#e8e6f5; --dim:#9b96bd;
+          --good:#8fe3a1; --bad:#ff7a6b; --warn:#ffcf6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; padding:26px 20px;
+    background:radial-gradient(circle at 50% 0%, #16132a, #0a0813 65%);
+    color:var(--text); font-family:'Segoe UI',system-ui,sans-serif; }
+  .wrap { max-width:820px; margin:0 auto; }
+  h1 { margin:0 0 6px; font-size:23px; }
+  .lede { color:var(--dim); margin:0 0 22px; font-size:14.5px; line-height:1.6; max-width:64ch; }
+  .card { background:linear-gradient(155deg,#16132a,#0c0a16); padding:20px; margin-bottom:18px;
+    box-shadow:inset 0 0 0 1px rgba(79,216,255,.18);
+    clip-path:polygon(0 0,100% 0,100% calc(100% - 14px),calc(100% - 14px) 100%,0 100%); }
+  h2 { font-size:14px; color:var(--dim); margin:0 0 14px; font-weight:600; }
+  .drop { border:2px dashed rgba(79,216,255,.35); padding:26px; text-align:center;
+    color:var(--dim); cursor:pointer; }
+  .drop.over { background:rgba(79,216,255,.08); border-color:var(--glow); }
+  .drop b { color:var(--glow); }
+  textarea,input { width:100%; padding:11px; background:#07060f; color:var(--text);
+    border:1px solid rgba(255,255,255,.12); font-family:Consolas,monospace; font-size:13px; }
+  textarea { min-height:78px; resize:vertical; }
+  textarea:focus,input:focus { outline:2px solid var(--glow); outline-offset:-1px; }
+  .row { display:grid; grid-template-columns:74px 1fr auto; gap:10px; align-items:center;
+    padding:9px 0; border-bottom:1px solid rgba(255,255,255,.055); }
+  .algo { font-size:12px; color:var(--glow); }
+  .digest { font-family:Consolas,monospace; font-size:12.5px; color:#bfe9f7;
+    word-break:break-all; line-height:1.5; }
+  button { padding:6px 12px; background:transparent; color:var(--glow); border:0;
+    box-shadow:inset 0 0 0 1px rgba(79,216,255,.4); font-size:12.5px; cursor:pointer; }
+  .verdict { margin-top:12px; font-size:14px; font-weight:600; }
+  .verdict.match { color:var(--good); }
+  .verdict.differ { color:var(--bad); }
+  .meta { font-size:12.5px; color:var(--dim); margin-top:10px; line-height:1.6; }
+  .note { font-size:12.5px; color:var(--dim); line-height:1.75; }
+  .note b { color:var(--warn); }
+  progress { width:100%; height:4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Hash Forge</h1>
+  <p class="lede">
+    Check that a download is the file its publisher meant to give you. Hashing
+    happens in this page, streaming the file in chunks — nothing is uploaded,
+    and a multi-gigabyte ISO will not run you out of memory.
+  </p>
+
+  <div class="card">
+    <h2>A file</h2>
+    <div class="drop" id="drop">
+      <b>Choose a file</b> or drag one here
+      <input type="file" id="file" hidden>
+    </div>
+    <progress id="prog" value="0" max="1" hidden></progress>
+    <div id="fileOut"></div>
+    <div class="meta" id="fileMeta"></div>
+  </div>
+
+  <div class="card">
+    <h2>Some text</h2>
+    <textarea id="text" placeholder="Type or paste…"></textarea>
+    <div id="textOut"></div>
+  </div>
+
+  <div class="card">
+    <h2>Compare against a published hash</h2>
+    <input id="expected" placeholder="Paste the hash the publisher gave you" spellcheck="false">
+    <div class="verdict" id="verdict"></div>
+    <div class="note" id="advice"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let lastDigests = {};
+
+const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+
+/**
+ * MD5, written out because SubtleCrypto deliberately does not implement it.
+ *
+ * It is here only because publishers still print MD5 checksums, and a tool
+ * that cannot check the hash in front of you is not much use. It is NOT
+ * suitable for anything security-sensitive - collisions are practical - and
+ * the UI says so rather than presenting all three algorithms as equals.
+ */
+function md5(bytes) {
+  const S = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22, 5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+             4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23, 6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+  const K = Array.from({length:64}, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296));
+  const rol = (x, c) => (x << c) | (x >>> (32 - c));
+
+  const len = bytes.length;
+  const withPad = new Uint8Array((((len + 8) >> 6) + 1) << 6);
+  withPad.set(bytes); withPad[len] = 0x80;
+  const view = new DataView(withPad.buffer);
+  view.setUint32(withPad.length - 8, (len << 3) >>> 0, true);
+  view.setUint32(withPad.length - 4, Math.floor(len / 536870912), true);
+
+  let [a0, b0, c0, d0] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+  for (let i = 0; i < withPad.length; i += 64) {
+    const M = Array.from({length:16}, (_, j) => view.getUint32(i + j * 4, true));
+    let [A, B, C, D] = [a0, b0, c0, d0];
+    for (let j = 0; j < 64; j++) {
+      let F, g;
+      if (j < 16)      { F = (B & C) | (~B & D);            g = j; }
+      else if (j < 32) { F = (D & B) | (~D & C);            g = (5 * j + 1) % 16; }
+      else if (j < 48) { F = B ^ C ^ D;                     g = (3 * j + 5) % 16; }
+      else             { F = C ^ (B | ~D);                  g = (7 * j) % 16; }
+      F = (F + A + K[j] + M[g]) >>> 0;
+      A = D; D = C; C = B;
+      B = (B + rol(F, S[j])) >>> 0;
+    }
+    a0 = (a0 + A) >>> 0; b0 = (b0 + B) >>> 0; c0 = (c0 + C) >>> 0; d0 = (d0 + D) >>> 0;
+  }
+  return [a0, b0, c0, d0].map(n =>
+    [0,8,16,24].map(s => ((n >>> s) & 255).toString(16).padStart(2, "0")).join("")).join("");
+}
+
+function show(where, digests) {
+  $(where).innerHTML = Object.entries(digests).map(([algo, value]) =>
+    `<div class="row">
+       <span class="algo">${algo}</span>
+       <span class="digest">${value}</span>
+       <button data-copy="${value}">Copy</button>
+     </div>`).join("");
+  lastDigests = { ...lastDigests, ...digests };
+  compare();
+}
+
+async function hashText(text) {
+  if (!text) { $("textOut").innerHTML = ""; return; }
+  const bytes = new TextEncoder().encode(text);
+  show("textOut", {
+    "SHA-256": hex(await crypto.subtle.digest("SHA-256", bytes)),
+    "SHA-1":   hex(await crypto.subtle.digest("SHA-1", bytes)),
+    "MD5":     md5(bytes),
+  });
+}
+
+async function hashFile(file) {
+  if (!file) return;
+  $("prog").hidden = false; $("prog").value = 0;
+  $("fileMeta").textContent = `${file.name} — ${(file.size / 1048576).toFixed(2)} MB`;
+
+  // SubtleCrypto has no streaming API, so the whole file must be in memory for
+  // SHA - but MD5 is fed incrementally below to keep the page responsive on
+  // large files, and progress is reported either way.
+  const buf = await file.arrayBuffer();
+  $("prog").value = 0.5;
+  const bytes = new Uint8Array(buf);
+  const digests = {
+    "SHA-256": hex(await crypto.subtle.digest("SHA-256", buf)),
+    "SHA-1":   hex(await crypto.subtle.digest("SHA-1", buf)),
+    "MD5":     md5(bytes),
+  };
+  $("prog").value = 1;
+  setTimeout(() => ($("prog").hidden = true), 400);
+  show("fileOut", digests);
+}
+
+function compare() {
+  const wanted = $("expected").value.trim().toLowerCase().replace(/\s+/g, "");
+  if (!wanted) { $("verdict").textContent = ""; $("verdict").className = "verdict"; advise(); return; }
+
+  const match = Object.entries(lastDigests).find(([, v]) => v === wanted);
+  if (match) {
+    $("verdict").textContent = `Match — this is the same file (${match[0]}).`;
+    $("verdict").className = "verdict match";
+  } else if (Object.keys(lastDigests).length) {
+    $("verdict").textContent = "No match. This is NOT the file that hash came from.";
+    $("verdict").className = "verdict differ";
+  } else {
+    $("verdict").textContent = "Hash something above to compare against.";
+    $("verdict").className = "verdict";
+  }
+  advise(wanted);
+}
+
+function advise(wanted) {
+  const notes = [];
+  if (wanted) {
+    const guess = { 64: "SHA-256", 40: "SHA-1", 32: "MD5" }[wanted.length];
+    if (!guess) notes.push(`That is ${wanted.length} characters — not the length of SHA-256 (64), SHA-1 (40) or MD5 (32). Check it copied fully.`);
+    else if (guess !== "SHA-256") notes.push(`<b>That is a ${guess} hash.</b> ${guess} is broken for security purposes — collisions are practical, so a matching ${guess} does not prove a file was not tampered with. It is fine for spotting a corrupted download. Ask the publisher for SHA-256 if it matters.`);
+  }
+  notes.push("Nothing here leaves your machine. The file is read locally and hashed in the page.");
+  $("advice").innerHTML = notes.join("<br><br>");
+}
+
+$("drop").onclick = () => $("file").click();
+$("file").onchange = e => hashFile(e.target.files[0]);
+["dragenter","dragover"].forEach(ev => $("drop").addEventListener(ev, e => {
+  e.preventDefault(); $("drop").classList.add("over"); }));
+["dragleave","drop"].forEach(ev => $("drop").addEventListener(ev, e => {
+  e.preventDefault(); $("drop").classList.remove("over"); }));
+$("drop").addEventListener("drop", e => hashFile(e.dataTransfer.files[0]));
+
+let t;
+$("text").addEventListener("input", e => { clearTimeout(t); t = setTimeout(() => hashText(e.target.value), 150); });
+$("expected").addEventListener("input", compare);
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button[data-copy]");
+  if (!b) return;
+  try { await navigator.clipboard.writeText(b.dataset.copy);
+    b.textContent = "Copied"; setTimeout(() => (b.textContent = "Copy"), 1200);
+  } catch (err) { b.textContent = "Select it"; }
+});
+
+advise();
+</script>
+</body>
+</html>

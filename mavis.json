@@ -1,0 +1,7 @@
+{
+  "name": "Hash Forge",
+  "description": "SHA-256, SHA-1 and MD5 for text or a whole file, with a compare box that tells you plainly whether two hashes match. Runs on the file in place - nothing is uploaded.",
+  "entry": "index.html",
+  "category": "Cybersecurity",
+  "keywords": ["open hash forge", "check this file's hash", "verify a download", "sha256 of a file"]
+}
